@@ -1,0 +1,85 @@
+name: LaraBeacon Laravel Audit
+description: Scan a prepared Laravel application, enforce a findings policy, and publish reports.
+author: Bär Softwareentwicklung UG (haftungsbeschränkt)
+branding:
+  icon: shield
+  color: blue
+inputs:
+  working-directory:
+    description: Laravel application directory, relative to the repository checkout.
+    default: '.'
+  fail-on:
+    description: Minimum blocking severity (info, minor, major, critical).
+    default: major
+  baseline:
+    description: Optional acceptance baseline path, relative to the Laravel application.
+    default: ''
+  only-new:
+    description: Fail only on findings outside the baseline (requires baseline).
+    default: 'false'
+  format:
+    description: Report format (sarif, json, markdown).
+    default: sarif
+  upload-artifact:
+    description: Upload the report as a workflow artifact.
+    default: 'true'
+  artifact-name:
+    description: Artifact name; use unique names for matrix jobs or multiple scans.
+    default: larabeacon-report
+  upload-sarif:
+    description: Upload to GitHub Code Scanning (requires sarif format and permissions).
+    default: 'false'
+outputs:
+  exit-code:
+    description: Scanner exit code (0 passed, 1 blocking findings or check errors, 2 invalid configuration).
+    value: ${{ steps.scan.outputs.exit-code }}
+  report-path:
+    description: Absolute path to the report, or empty if no report was generated.
+    value: ${{ steps.scan.outputs.report-path }}
+  artifact-id:
+    description: GitHub artifact ID, or empty if no artifact was uploaded.
+    value: ${{ steps.artifact.outputs.artifact-id }}
+  sarif-id:
+    description: GitHub SARIF upload ID, or empty if no Code Scanning upload completed.
+    value: ${{ steps.sarif.outputs.sarif-id }}
+runs:
+  using: composite
+  steps:
+    - name: Scan Laravel application
+      id: scan
+      shell: bash
+      env:
+        LB_WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        LB_FAIL_ON: ${{ inputs.fail-on }}
+        LB_BASELINE: ${{ inputs.baseline }}
+        LB_ONLY_NEW: ${{ inputs.only-new }}
+        LB_FORMAT: ${{ inputs.format }}
+        LB_UPLOAD_ARTIFACT: ${{ inputs.upload-artifact }}
+        LB_UPLOAD_SARIF: ${{ inputs.upload-sarif }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/scan.sh"
+    - name: Upload report artifact
+      id: artifact
+      if: ${{ !cancelled() && inputs.upload-artifact == 'true' && steps.scan.outputs.report-path != '' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ steps.scan.outputs.report-path }}
+        if-no-files-found: error
+    - name: Upload Code Scanning results
+      id: sarif
+      if: ${{ !cancelled() && inputs.upload-sarif == 'true' && steps.scan.outputs.report-path != '' }}
+      uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4
+      with:
+        sarif_file: ${{ steps.scan.outputs.report-path }}
+        checkout_path: ${{ github.workspace }}
+        category: larabeacon/${{ inputs.working-directory }}
+    - name: Enforce findings policy
+      if: ${{ !cancelled() && steps.scan.outputs.exit-code != '' }}
+      shell: bash
+      env:
+        LB_EXIT_CODE: ${{ steps.scan.outputs.exit-code }}
+      run: |
+        if [[ "$LB_EXIT_CODE" != 0 ]]; then
+          printf '::error::LaraBeacon failed with exit code %s. Inspect the scan log and report.\n' "$LB_EXIT_CODE"
+          exit 1
+        fi

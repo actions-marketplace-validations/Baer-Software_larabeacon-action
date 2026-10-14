@@ -1,0 +1,88 @@
+name: Action tests
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  unit:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
+        with:
+          php-version: '8.3'
+          coverage: none
+      - run: bash -n scripts/scan.sh
+      - run: python3 -m unittest discover -s tests -v
+  laravel:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
+        with:
+          php-version: '8.3'
+          coverage: none
+      - name: Prepare real Laravel application
+        run: |
+          composer create-project laravel/laravel app '^12.0' --no-interaction --prefer-dist
+          cd app
+          composer require --dev baer-software/larabeacon:^3.1 --no-interaction --prefer-dist
+      - name: Scan real application
+        id: audit
+        continue-on-error: true
+        uses: ./
+        with:
+          working-directory: app
+          artifact-name: real-laravel-report
+          upload-sarif: ${{ github.event_name != 'pull_request' }}
+      - name: Verify scanner completed and exported SARIF
+        env:
+          SCAN_EXIT: ${{ steps.audit.outputs.exit-code }}
+          REPORT_PATH: ${{ steps.audit.outputs.report-path }}
+          ARTIFACT_ID: ${{ steps.audit.outputs.artifact-id }}
+          SARIF_ID: ${{ steps.audit.outputs.sarif-id }}
+          EXPECT_SARIF: ${{ github.event_name != 'pull_request' }}
+        run: |
+          [[ "$SCAN_EXIT" == 0 || "$SCAN_EXIT" == 1 ]]
+          test -n "$ARTIFACT_ID"
+          if [[ "$EXPECT_SARIF" == true ]]; then test -n "$SARIF_ID"; fi
+          php -r '$r=json_decode(file_get_contents(getenv("REPORT_PATH")), true, 512, JSON_THROW_ON_ERROR); if ($r["version"] !== "2.1.0" || $r["runs"][0]["tool"]["driver"]["name"] !== "LaraBeacon") exit(1);'
+      - name: Prepare controlled composite failure
+        run: |
+          mkdir -p fixture/vendor
+          touch fixture/vendor/autoload.php
+          cat > fixture/artisan <<'PHP'
+          <?php
+          foreach ($argv as $arg) {
+              if (str_starts_with($arg, '--output=')) {
+                  file_put_contents(substr($arg, 9), '{"version":"2.1.0","runs":[]}');
+              }
+          }
+          exit(1);
+          PHP
+      - name: Verify failing action still uploads report
+        id: failure
+        continue-on-error: true
+        uses: ./
+        with:
+          working-directory: fixture
+          artifact-name: blocking-report
+      - name: Assert gate fails after export
+        env:
+          ACTION_OUTCOME: ${{ steps.failure.outcome }}
+          SCAN_EXIT: ${{ steps.failure.outputs.exit-code }}
+          REPORT_PATH: ${{ steps.failure.outputs.report-path }}
+          ARTIFACT_ID: ${{ steps.failure.outputs.artifact-id }}
+        run: |
+          [[ "$ACTION_OUTCOME" == failure && "$SCAN_EXIT" == 1 ]]
+          test -s "$REPORT_PATH"
+          test -n "$ARTIFACT_ID"
